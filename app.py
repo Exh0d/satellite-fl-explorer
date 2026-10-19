@@ -69,9 +69,26 @@ h1, h2, h3 { letter-spacing: -.02em; }
 # CHANGED: added Knowledge Check page
 PAGES = ["Overview", "Learn", "Explore & Results", "Knowledge Check", "Research"]
 
-# NEW: local Ollama tutor settings (override with environment variables if needed)
-OLLAMA_URL = os.getenv("OLLAMA_URL", "http://localhost:11434")
-OLLAMA_MODEL = os.getenv("OLLAMA_MODEL", "llama3.2")  # must match `ollama list`
+def _setting(name: str, default: str = "") -> str:
+    """Read a setting from environment variables, then Streamlit secrets."""
+    value = os.getenv(name, "")
+    if not value:
+        try:
+            value = str(st.secrets.get(name, ""))
+        except Exception:
+            value = ""  # no secrets file is fine when running locally
+    return value.strip() or default
+
+
+# Local default: Ollama on your own computer.
+# Deployed: set OLLAMA_URL, OLLAMA_MODEL, and OLLAMA_API_KEY in Streamlit secrets.
+OLLAMA_URL = _setting("OLLAMA_URL", "http://localhost:11434").rstrip("/")
+OLLAMA_MODEL = _setting("OLLAMA_MODEL", "llama3.2")
+OLLAMA_API_KEY = _setting("OLLAMA_API_KEY")
+
+
+def _ollama_headers() -> dict[str, str]:
+    return {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {}
 
 # NEW: single source of truth for Explore defaults (used by init and Reset)
 EXPLORE_DEFAULTS = {
@@ -384,7 +401,7 @@ def ollama_available() -> bool:
     if requests is None:
         return False
     try:
-        return requests.get(f"{OLLAMA_URL}/api/tags", timeout=1.5).ok
+        return requests.get(f"{OLLAMA_URL}/api/tags", headers=_ollama_headers(), timeout=5).ok
     except Exception:
         return False
 
@@ -395,11 +412,12 @@ def ollama_answer(question: str, result: dict[str, Any] | None, page: str) -> st
     messages.append(_context_message(question, result, page))
     try:
         r = requests.post(
-            f"{OLLAMA_URL}/api/chat",
-            json={"model": OLLAMA_MODEL, "messages": messages, "stream": False,
-                  "options": {"num_predict": 600}},
-            timeout=180,
-        )
+    f"{OLLAMA_URL}/api/chat",
+    headers=_ollama_headers(),
+    json={"model": OLLAMA_MODEL, "messages": messages, "stream": False,
+          "options": {"num_predict": 600}},
+    timeout=180,
+)
         if r.status_code != 200:
             try:
                 detail = r.json().get("error", r.text)
@@ -414,8 +432,8 @@ def ollama_answer(question: str, result: dict[str, Any] | None, page: str) -> st
         return ("The local model took too long to answer. The first question can be slow while the model "
                 "loads into memory; please try again.")
     except Exception as exc:
-        return (f"Couldn't reach the local Ollama tutor ({type(exc).__name__}). Check that Ollama is running "
-                "(`ollama serve`).")
+        return (f"The AI tutor is temporarily unavailable ({type(exc).__name__}). "
+        "Please try again in a moment.")
 
 
 def tutor_mode_label() -> str:
