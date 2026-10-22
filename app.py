@@ -24,12 +24,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from backend.fl_simulator import CLASS_NAMES, make_preview_partition, run_demo_experiment
+from interface.learn import render_learn as render_learn_page, render_knowledge_check_page
 
 st.set_page_config(
     page_title="Satellite FL Explorer",
     page_icon="🛰️",
     layout="wide",
-    initial_sidebar_state="expanded",
+    initial_sidebar_state="collapsed",
 )
 
 # A cohesive, low-contrast dashboard theme inspired by the project wireframes.
@@ -61,6 +62,13 @@ h1, h2, h3 { letter-spacing: -.02em; }
 .small-note { color: #698096; font-size: .75rem; line-height: 1.35; }
 .land-card { border: 1px solid #dce7f2; border-radius: 9px; padding: .35rem; text-align: center; background: #f7fbff; margin-bottom: .35rem; }
 .land-emoji { font-size: 1.45rem; line-height: 1.6; }
+.nav-rail-brand { text-align:center; font-size:1.35rem; padding:.25rem 0 .75rem 0; }
+.nav-rail-caption { text-align:center; color:#7890a8; font-size:.58rem; font-weight:800; letter-spacing:.08em; margin-bottom:.25rem; }
+div[class*="st-key-rail_nav_"] button { min-height:46px !important; height:46px !important; padding:0 !important; border-radius:12px !important; }
+div[class*="st-key-rail_nav_"] button p { font-size:1.2rem !important; margin:0 !important; }
+.nav-card-icon { font-size:1.65rem; line-height:1.2; margin-bottom:.35rem; }
+.nav-card-title { color:#144f9c; font-weight:800; font-size:1.05rem; margin:.1rem 0 .25rem 0; }
+.nav-card-body { color:#62788e; font-size:.87rem; min-height:3.6rem; }
 </style>
 """,
     unsafe_allow_html=True,
@@ -122,6 +130,11 @@ st.session_state.setdefault("tutor_messages", [
 ])
 for _key, _value in EXPLORE_DEFAULTS.items():
     st.session_state.setdefault(_key, _value)
+
+
+def navigate_to(page: str) -> None:
+    """Navigate to a page from the icon rail or overview cards."""
+    st.session_state["selected_page"] = page
 
 
 @st.cache_data(show_spinner=False, max_entries=24)
@@ -460,6 +473,25 @@ def ask_and_record(question: str, result: dict[str, Any] | None, page: str) -> N
     st.session_state.tutor_messages = st.session_state.tutor_messages[-10:]
 
 
+def tutor_inline(current_page: str) -> None:
+    """Visible, collapsible tutor available on Learn, Quiz, and Research pages."""
+    page_key = current_page.lower().replace(" ", "_").replace("&", "and")
+    with st.expander("🤖 AI Tutor / Helper", expanded=False):
+        st.caption(f"Tutor mode: {tutor_mode_label()}. Ask about the current lesson or your latest experiment.")
+        for msg in st.session_state.tutor_messages[-4:]:
+            with st.chat_message(msg["role"]):
+                st.markdown(msg["content"])
+        with st.form(f"inline_tutor_form_{page_key}", clear_on_submit=True):
+            question = st.text_input(
+                "Ask a question", placeholder="e.g. Why does a smaller α create more uneven clients?",
+                key=f"inline_tutor_question_{page_key}",
+            )
+            ask = st.form_submit_button("Ask tutor", use_container_width=True)
+        if ask and question.strip():
+            ask_and_record(question, get_current_result(), current_page)
+            st.rerun()
+
+
 def tutor_sidebar(current_page: str) -> None:
     result = get_current_result()
     with st.sidebar:
@@ -503,7 +535,33 @@ def render_hero(eyebrow: str, title: str, body: str) -> None:
 
 
 def render_overview() -> None:
-    render_hero("INTERACTIVE DEEP-LEARNING LAB", "🛰️ Satellite FL Explorer", "Learn, experiment, and investigate the challenges of federated learning across satellite networks.")
+    render_hero(
+        "INTERACTIVE DEEP-LEARNING LAB",
+        "🛰️ Satellite FL Explorer",
+        "Learn, experiment, and investigate the challenges of federated learning across satellite networks.",
+    )
+
+    # Four functional cards provide a clear entry point into the main learning areas.
+    st.markdown("### Explore the learning lab")
+    card_specs = [
+        ("📘", "Learn", "Understand FedAvg, IID vs. non-IID data, and satellite constraints."),
+        ("🛰️", "Explore & Results", "Configure an experiment and inspect model performance."),
+        ("✅", "Knowledge Check", "Test your understanding and get explanations for your answers."),
+        ("📚", "Research", "Explore methods and open-source projects from the literature."),
+    ]
+    card_cols = st.columns(4, gap="small")
+    for col, (icon, title, description) in zip(card_cols, card_specs):
+        with col:
+            with st.container(border=True):
+                st.markdown(f"<div class='nav-card-icon'>{icon}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='nav-card-title'>{title}</div>", unsafe_allow_html=True)
+                st.markdown(f"<div class='nav-card-body'>{description}</div>", unsafe_allow_html=True)
+                st.button(
+                    f"Open {title} →", key=f"overview_open_{title.lower().replace(' ', '_').replace('&', 'and')}",
+                    use_container_width=True, on_click=navigate_to, args=(title,),
+                    type="primary" if title == "Explore & Results" else "secondary",
+                )
+
     result = get_current_result()
     cfg = result.get("config", {}) if result else {}
     metrics = result.get("metrics", {}) if result else {}
@@ -544,27 +602,12 @@ def render_overview() -> None:
             if overview_ask and overview_question.strip():
                 ask_and_record(overview_question, result, "Overview")
                 st.rerun()
-            if result:
+            if result and final_acc is not None:
                 st.markdown("**Latest run insight**")
-                if final_acc is not None:
-                    st.write(f"Global test accuracy changed from {last_acc[0]:.1%} to {last_acc[-1]:.1%} over {cfg.get('rounds', len(last_acc)-1)} rounds.")
+                st.write(f"Global test accuracy changed from {last_acc[0]:.1%} to {last_acc[-1]:.1%} over {cfg.get('rounds', len(last_acc)-1)} rounds.")
             else:
                 st.markdown("**Start here**")
-                st.write("Open Learn to understand FedAvg, then use Explore & Results to run your first experiment and interpret the outputs.")
-
-    st.subheader("Your learning path")
-    cols = st.columns(4)
-    cards = [
-        ("01", "Learn", "Understand local training, aggregation, and IID vs non-IID."),
-        ("02", "Explore & Results", "Predict, run training, and inspect accuracy, loss, and communication."),
-        ("03", "Knowledge Check", "Compare your prediction with the measured outcome."),
-        ("04", "Research", "Connect observed limitations to satellite-FL literature."),
-    ]
-    for col, (num, title, description) in zip(cols, cards):
-        with col, st.container(border=True):
-            st.caption(f"MODULE {num}")
-            st.markdown(f"### {title}")
-            st.write(description)
+                st.write("Choose Learn for the concepts, then open Explore & Results to run an experiment. Knowledge Check contains scored questions with feedback.")
 
     with st.container(border=True):
         st.subheader("Recent model performance")
@@ -575,59 +618,6 @@ def render_overview() -> None:
             st.progress(0.0, text="Waiting for first training run")
 
     st.caption("Prototype limitation: current FedAvg metrics use synthetic feature vectors and a linear classifier, not EuroSAT imagery/CNN. Client map markers are illustrative.")
-
-
-def render_learn() -> None:
-    page_intro("MODULE 01 · CONCEPTS", "Learn", "Build intuition for federated learning before running an experiment.")
-    tab_basics, tab_distribution, tab_satellite = st.tabs(["FedAvg basics", "IID vs non-IID", "Why satellites are different"])
-    with tab_basics:
-        with st.container(border=True):
-            st.subheader("One federated-learning round")
-            cols = st.columns(4)
-            steps = [
-                ("01 · Distribute", "The coordinator sends the current global model to available clients."),
-                ("02 · Train", "Each client updates a local copy using its own samples."),
-                ("03 · Aggregate", "The server averages the participating client parameters."),
-                ("04 · Evaluate", "The new global model is assessed on a common held-out set."),
-            ]
-            for col, (title, detail) in zip(cols, steps):
-                with col:
-                    st.markdown(f"**{title}**")
-                    st.caption(detail)
-            st.latex(r"w^{(t+1)} = \sum_{i\in S_t}\frac{|D_i|}{\sum_{j\in S_t}|D_j|}\,w_i^{(t+1)}")
-            st.caption("Sₜ is the set of clients participating in round t; each participant is weighted by its local sample count.")
-        st.subheader("Check your understanding")
-        answer = st.radio("In FedAvg, what is aggregated at the server?", ["Raw images from each satellite", "Updated local model parameters", "The orbit coordinates only"], key="learn_fedavg_quiz")
-        if st.button("Check answer", key="check_fedavg"):
-            if answer == "Updated local model parameters":
-                st.success("Correct. Each client trains locally and sends model parameters or updates for aggregation.")
-            else:
-                st.warning("Not quite. The key idea is that raw training data stay local; the server aggregates model information.")
-    with tab_distribution:
-        st.markdown("A satellite constellation may see different places and therefore different label distributions. This is called statistical heterogeneity or non-IID data.")
-        alpha_col, client_col = st.columns([1, 1])
-        with alpha_col:
-            partition = st.radio("Preview partition", ["IID", "Non-IID"], horizontal=True, key="learn_partition")
-            alpha = st.slider("Dirichlet concentration α", 0.05, 5.0, 0.3, step=0.05, disabled=(partition == "IID"), key="learn_alpha")
-            clients = st.select_slider("Number of clients", [2, 3, 4, 5, 6, 8], value=4, key="learn_clients")
-            st.caption("Smaller α usually increases class imbalance. The effect on model accuracy must be measured; it is not guaranteed to be monotonic.")
-        with client_col:
-            preview = pd.DataFrame(cached_preview(int(clients), partition, float(alpha), 42))
-            st.plotly_chart(distribution_figure(preview, "What each client receives"), use_container_width=True)
-        st.markdown("**Think before running:** If each satellite has a different class mix, will local updates always point in the same direction? Why or why not?")
-    with tab_satellite:
-        p1, p2, p3 = st.columns(3)
-        with p1, st.container(border=True):
-            st.markdown("### 📡 Intermittent contact")
-            st.write("A satellite may be out of range of the ground station during some rounds.")
-        with p2, st.container(border=True):
-            st.markdown("### ⚙️ Limited resources")
-            st.write("Onboard energy, memory, compute, and bandwidth can limit local training.")
-        with p3, st.container(border=True):
-            st.markdown("### 🧭 Different data")
-            st.write("Different regions and sensors can produce distribution shift across clients.")
-        st.info("These are the target application challenges. The current running simulator implements client participation as a simplified availability setting; orbital geometry and onboard hardware are not physically simulated.")
-
 
 def reset_explore_settings() -> None:
     """Reset Explore widgets via a Streamlit callback (before widgets rerender)."""
@@ -944,36 +934,6 @@ def render_explore() -> None:
     st.caption("Prototype note: training currently uses synthetic feature vectors and a linear softmax classifier, not actual EuroSAT images/CNN. Contact areas and satellite positions are illustrative.")
 
 
-# NEW: Knowledge Check page (quiz content to be supplied by Member C)
-def render_knowledge_check() -> None:
-    page_intro("MODULE 03 · CHECK", "Knowledge Check",
-               "Compare your prediction with what the experiment showed.")
-    result = st.session_state.get("last_result")
-    with st.container(border=True):
-        st.subheader("Your prediction")
-        if st.session_state.get("last_hypothesis"):
-            st.markdown(f"**Before running you predicted:** non-IID data will… *{st.session_state.last_hypothesis}*")
-        else:
-            st.caption("Make a prediction on Explore & Results before pressing Run.")
-    if not result:
-        st.info("Run an experiment in Explore & Results first, then come back here.")
-        return
-    cfg = result.get("config", {})
-    acc = result.get("metrics", {}).get("global_accuracy", [])
-    with st.container(border=True):
-        st.subheader("Interpret results")
-        if result.get("result_source") != "measured":
-            st.warning("Illustrative example: synthetic prototype data, not measured EuroSAT training.")
-        if acc:
-            st.markdown(f"**What happened:** {cfg.get('partition')} data, α = {cfg.get('alpha')}, "
-                        f"{cfg.get('num_clients')} satellites, {cfg.get('rounds')} rounds. "
-                        f"Global accuracy went from {acc[0]:.1%} (untrained baseline) to {acc[-1]:.1%}.")
-        st.caption("Planned: a factual explanation from Member C's explain_result(result) will appear here.")
-    with st.container(border=True):
-        st.subheader("Quiz")
-        st.caption("Planned: Member C will supply questions and feedback here.")
-
-
 def render_research() -> None:
     page_intro("MODULE 04 · LITERATURE", "Research & design ideas", "Connect the behaviors you can demonstrate to approaches studied in satellite federated-learning literature.")
     items = [
@@ -1002,56 +962,61 @@ def render_research() -> None:
 
 
 def main() -> None:
-    # Migrate old Streamlit session-state values after merging Explore + Results.
-    if st.session_state.pop("navigate_to_results", False):
-        st.session_state.page_nav = "Explore & Results"
-        st.session_state.selected_page = "Explore & Results"
-    for key in ("page_nav", "selected_page"):
-        if st.session_state.get(key) in ("Explore", "Results"):
-            st.session_state[key] = "Explore & Results"
-        if key in st.session_state and st.session_state.get(key) not in PAGES:
-            st.session_state[key] = "Overview"
+    pages = [
+        ("Overview", "🏠"),
+        ("Learn", "📘"),
+        ("Explore & Results", "🛰️"),
+        ("Knowledge Check", "✅"),
+        ("Research", "📚"),
+    ]
 
-    with st.sidebar:
-        st.markdown("## 🛰️ Satellite FL")
-        st.caption("Interactive learning toolkit")
-        st.markdown("### Pages")
-        selected_page = st.radio(
-            "Navigate", PAGES,
-            index=PAGES.index(st.session_state.get("selected_page", "Overview")),
-            label_visibility="collapsed", key="page_nav",
-        )
-        st.session_state.selected_page = selected_page
-        # NEW: progress indicator
-        page_number = PAGES.index(selected_page) + 1
-        st.progress(page_number / len(PAGES), text=f"Module {page_number} of {len(PAGES)}")
+    # Migrate state from earlier versions of the app.
+    legacy_page = st.session_state.get("page_nav", st.session_state.get("selected_page", "Overview"))
+    if legacy_page in ("Explore", "Results"):
+        legacy_page = "Explore & Results"
+    if legacy_page not in [page for page, _ in pages]:
+        legacy_page = "Overview"
+    st.session_state.setdefault("selected_page", legacy_page)
+    if st.session_state.get("selected_page") not in [page for page, _ in pages]:
+        st.session_state["selected_page"] = "Overview"
+
+    # Slim in-app icon rail inspired by the team's mockup. Sidebar remains available
+    # for supplemental tutor/status content but is collapsed by default.
+    nav_col, content_col = st.columns([0.52, 10], gap="small")
+    with nav_col:
+        with st.container(border=True):
+            st.markdown("<div class='nav-rail-brand'>🛰️</div><div class='nav-rail-caption'>NAV</div>", unsafe_allow_html=True)
+            for page, icon in pages:
+                active = st.session_state.selected_page == page
+                st.button(
+                    icon,
+                    key="rail_nav_" + page.lower().replace(" ", "_").replace("&", "and"),
+                    help=page,
+                    type="primary" if active else "secondary",
+                    use_container_width=True,
+                    on_click=navigate_to,
+                    args=(page,),
+                )
+            st.markdown("<div style='height:8px'></div>", unsafe_allow_html=True)
+
+    selected_page = st.session_state.selected_page
+
+    with content_col:
+        if selected_page in ["Learn", "Knowledge Check", "Research"]:
+            tutor_inline(selected_page)
+        if selected_page == "Overview":
+            render_overview()
+        elif selected_page == "Learn":
+            render_learn_page()
+        elif selected_page == "Explore & Results":
+            render_explore()
+        elif selected_page == "Knowledge Check":
+            render_knowledge_check_page()
+        elif selected_page == "Research":
+            render_research()
+
         st.divider()
-        result = get_current_result()
-        if result:
-            st.success("Experiment available")
-            cfg = result.get("config", {})
-            st.caption(f"{cfg.get('num_clients', '?')} clients · {cfg.get('partition', '?')}")
-        else:
-            st.caption("Run your first experiment from Explore & Results")
-        st.caption(f"AI tutor: {tutor_mode_label()}")  # CHANGED
-        st.caption("Data: synthetic prototype")
-
-    if selected_page not in ["Overview", "Explore & Results"]:
-        tutor_sidebar(selected_page)
-
-    if selected_page == "Overview":
-        render_overview()
-    elif selected_page == "Learn":
-        render_learn()
-    elif selected_page == "Explore & Results":
-        render_explore()
-    elif selected_page == "Knowledge Check":
-        render_knowledge_check()
-    elif selected_page == "Research":
-        render_research()
-
-    st.divider()
-    st.caption("Satellite FL Explorer · Educational prototype · synthetic benchmark unless otherwise stated")
+        st.caption("Satellite FL Explorer · Educational prototype · synthetic benchmark unless otherwise stated")
 
 
 if __name__ == "__main__":
