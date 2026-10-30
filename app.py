@@ -23,9 +23,9 @@ ROOT = Path(__file__).resolve().parent
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from backend.fl_simulator import CLASS_NAMES
+from backend.fl_simulator import CLASS_NAMES, make_preview_partition, run_demo_experiment
 from interface.learn import render_learn as render_learn_page, render_knowledge_check_page
-from interface.measured_studies import render_measured_studies, load_default_measured_result
+from interface.measured_studies import render_measured_studies
 
 st.set_page_config(
     page_title="Satellite FL Explorer",
@@ -99,6 +99,18 @@ OLLAMA_API_KEY = _setting("OLLAMA_API_KEY")
 def _ollama_headers() -> dict[str, str]:
     return {"Authorization": f"Bearer {OLLAMA_API_KEY}"} if OLLAMA_API_KEY else {}
 
+# NEW: single source of truth for Explore defaults (used by init and Reset)
+EXPLORE_DEFAULTS = {
+    "explore_clients": 3,
+    "explore_partition": "Non-IID",
+    "explore_alpha": 0.3,
+    "explore_epochs": 2,
+    "explore_rounds": 10,
+    "explore_participation": 0.75,
+    "explore_seed": 42,
+    "explore_hypothesis": "May change convergence/performance",
+}
+
 # NEW: emoji/colour per class; unknown classes get a default card
 CLASS_STYLE = {
     "Annual crop": ("🌾", "#f9efd2"), "Forest": ("🌲", "#e5f3df"),
@@ -108,17 +120,37 @@ CLASS_STYLE = {
     "River": ("🏞️", "#dceefb"), "Sea / lake": ("🌊", "#d6ebf8"),
 }
 
+st.session_state.setdefault("last_result", None)
+st.session_state.setdefault("run_history", [])
 st.session_state.setdefault("selected_page", "Overview")
+st.session_state.setdefault("explore_mode", "Measured parameter studies")
 st.session_state.setdefault("tutor_messages", [
     {"role": "assistant", "content": (
         "Hi! I'm your Satellite FL tutor. Ask follow-up questions about federated learning, satellite "
         "constraints, or your latest experiment. Answers come from a local Ollama model running on your computer."
     )}
 ])
+for _key, _value in EXPLORE_DEFAULTS.items():
+    st.session_state.setdefault(_key, _value)
+
 
 def navigate_to(page: str) -> None:
     """Navigate to a page from the icon rail or overview cards."""
     st.session_state["selected_page"] = page
+
+
+@st.cache_data(show_spinner=False, max_entries=24)
+def cached_preview(num_clients: int, partition: str, alpha: float, seed: int):
+    return make_preview_partition(num_clients, partition, alpha, seed)
+
+
+@st.cache_data(show_spinner=False, max_entries=20)
+def cached_experiment(num_clients: int, partition: str, alpha: float, rounds: int,
+                      local_epochs: int, seed: int, participation_rate: float):
+    return run_demo_experiment(
+        num_clients=num_clients, partition=partition, alpha=alpha, rounds=rounds,
+        local_epochs=local_epochs, seed=seed, participation_rate=participation_rate,
+    )
 
 
 def page_intro(eyebrow: str, title: str, description: str) -> None:
@@ -132,10 +164,10 @@ def get_current_result() -> dict[str, Any] | None:
     measured = st.session_state.get("active_measured_result")
     if measured:
         return measured
-    # Show a real measured reference run on Overview even before the learner
-    # has opened Explore & Results in this browser session. Do not fall back to
-    # stale session-state prototype results from older app versions.
-    return load_default_measured_result() or read_preset_results()
+    result = st.session_state.get("last_result")
+    if result:
+        return result
+    return read_preset_results()
 
 
 # NEW: accept teammates' schema-1.0 JSON as well as this app's format
@@ -277,22 +309,19 @@ def metrics_figure(result: dict[str, Any], compact: bool = False) -> None:
         st.info("The current result does not include accuracy and loss histories.")
         return
     rounds = list(range(len(accuracy)))
-    split_label = "validation" if result.get("result_source") == "measured" else "model"
-    accuracy_label = f"Global {split_label} accuracy"
-    loss_label = f"Global {split_label} loss"
-    accuracy_df = pd.DataFrame({"FL round": rounds, accuracy_label: accuracy})
-    loss_df = pd.DataFrame({"FL round": list(range(len(loss))), loss_label: loss})
+    accuracy_df = pd.DataFrame({"FL round": rounds, "Global test accuracy": accuracy})
+    loss_df = pd.DataFrame({"FL round": list(range(len(loss))), "Global test loss": loss})
     left, right = st.columns(2)
     with left:
-        fig = px.line(accuracy_df, x="FL round", y=accuracy_label, markers=True, title=accuracy_label.title())
+        fig = px.line(accuracy_df, x="FL round", y="Global test accuracy", markers=True, title="Global test accuracy")
         fig.update_yaxes(tickformat=".0%", rangemode="tozero")
         fig.update_layout(height=270 if compact else 325, margin=dict(l=10, r=10, t=55, b=10))
         st.plotly_chart(fig, use_container_width=True)
     with right:
-        fig = px.line(loss_df, x="FL round", y=loss_label, markers=True, title=loss_label.title())
+        fig = px.line(loss_df, x="FL round", y="Global test loss", markers=True, title="Global test loss")
         fig.update_layout(height=270 if compact else 325, margin=dict(l=10, r=10, t=55, b=10))
         st.plotly_chart(fig, use_container_width=True)
-    st.caption("Round 0 is the untrained baseline evaluation before any federated training. Pilot curves are validation metrics, not held-out test metrics.")
+    st.caption("Round 0 is the untrained baseline evaluation before any federated training.")
 
 
 # ---------------------------------------------------------------------------
@@ -311,7 +340,7 @@ def local_tutor_answer(question: str, result: dict[str, Any] | None, page: str) 
     if any(w in q for w in ["fedavg", "aggregation", "average", "global model"]):
         if result and result.get("result_source") == "measured":
             return ("FedAvg sends the current global model to selected clients, trains locally, then aggregates client model updates weighted by the clients' local sample counts. The selected curves are from saved offline EuroSAT RGB/CNN pilot runs; the app is displaying those results rather than retraining them.")
-        return ("FedAvg sends the current global model to participating clients, lets each train on local data, then averages the updated model parameters weighted by each client's sample count. The Explore & Results page displays saved offline EuroSAT/CNN FedAvg runs; changing a parameter selector chooses among those measured configurations rather than retraining a model.")
+        return ("FedAvg sends the current global model to participating clients, lets each train on local data, then averages the updated model parameters weighted by each client's sample count. This interactive prototype uses a small softmax classifier on synthetic features, not the measured EuroSAT/CNN experiments.")
     if any(w in q for w in ["accuracy", "loss", "result", "performance", "improve"]):
         if metrics.get("global_accuracy") and metrics.get("global_loss"):
             acc, loss = float(metrics["global_accuracy"][-1]), float(metrics["global_loss"][-1])
@@ -321,11 +350,11 @@ def local_tutor_answer(question: str, result: dict[str, Any] | None, page: str) 
                 return (f"For {case}, the saved run finishes at {acc:.1%} validation accuracy (round-0 baseline {initial:.1%}) "
                         f"and validation cross-entropy loss {loss:.4f}. These are measured offline validation results, "
                         "not held-out test metrics; the pilot did not run a final test evaluation.")
-            return (f"The current result finishes at {acc:.1%} model accuracy (initial {initial:.1%}) "
-                    f"and loss {loss:.3f}. Check the result source and metric split before interpreting it.")
-        return "Open Explore & Results and select a parameter study and measured configuration first."
+            return (f"In the latest prototype run, final global test accuracy was {acc:.1%} (initial {initial:.1%}) "
+                    f"and final loss was {loss:.3f}. These metrics belong to the synthetic prototype, not the measured EuroSAT runs.")
+        return "Open Explore & Results and select a measured study or run the interactive prototype first."
     if any(w in q for w in ["map", "satellite", "contact", "orbit", "connected", "communication"]):
-        return ("The map is a conceptual illustration of FL clients and a ground station. When a measured run is selected, client availability is taken from that run's recorded participation in the inspected round. Satellite positions and coverage areas are illustrative markers, not real orbital propagation or visibility calculations.")
+        return ("The map is a conceptual illustration of simulated FL clients and a ground station. Green satellites are treated as available in the displayed round; grey satellites are unavailable. Positions are illustrative markers, not real orbital propagation or a visibility calculation. The participation setting is what changes availability in the demo.")
     if any(w in q for w in ["stale", "asynchronous", "async"]):
         return "A stale update was computed from an older global-model version than the latest server model. Asynchronous FL can use updates without waiting for every client, but older updates may be less aligned with the current model. This is a research concept in the current website, not yet a full implementation."
     if any(w in q for w in ["split", "sfl", "split learning"]):
@@ -338,7 +367,7 @@ def local_tutor_answer(question: str, result: dict[str, Any] | None, page: str) 
         if result and result.get("result_source") == "measured":
             return (f"The selected measured run has {count} clients and a configured participation rate of {rate:.0%}. "
                     "The saved per-round records identify which client IDs actually participated. Participation was randomly selected in each round; these are offline simulation records, not measured satellite contact windows.")
-        return "Open Explore & Results to select a measured client-participation study. Its heatmap shows the clients recorded as participating in each of the 50 offline communication rounds."
+        return f"The current prototype has {count} clients and uses a participation rate of {rate:.0%}; at least one client contributes each round. Reducing participation can reduce simulated upload traffic but also means fewer local datasets contribute to each global update. This is a simplified availability model, not a radio simulation."
     return (f"I can help with FedAvg, IID vs non-IID data, α, training accuracy/loss, satellite contact, participation, stale updates, and split federated learning. You're currently on the {page} page. Try asking, for example, 'What does alpha control?' or 'Explain the latest accuracy.'")
 
 
@@ -348,7 +377,7 @@ TUTOR_INSTRUCTIONS = (
     "Have a natural, multi-turn conversation. Explain concepts clearly for university students who know basic "
     "deep learning, use equations or examples when helpful, ask a brief clarifying question when needed, and "
     "connect answers to the current experiment when relevant. Be honest about uncertainty. "
-    "Do not invent experiment curves or imply an unmeasured parameter combination was run. For the saved offline runs, call the plotted curves "
+    "Do not claim synthetic-demo metrics are EuroSAT results. For measured offline runs, call the plotted curves "
     "validation accuracy and validation loss, never test metrics; the pilot has no final held-out test evaluation. "
     "Clearly distinguish implemented features from "
     "research ideas that are only illustrated. Keep most responses under about 150 words unless the user asks "
@@ -372,14 +401,15 @@ def build_tutor_context(result: dict[str, Any] | None, page: str) -> dict[str, A
             "final_global_loss": losses[-1] if losses else None,
             "selected_round": cfg.get("selected_round") if is_measured else None,
             "selected_round_metrics": result.get("selected_round_metrics") if is_measured else None,
-            "metric_split": result.get("round_metric_split", "validation") if result else None,
+            "metric_split": result.get("round_metric_split", "validation" if is_measured else "prototype test") if result else None,
         } if result else None,
         "interpretation_limits": (
             "The selected result is an offline measured FedAvg run on EuroSAT RGB data. Its round-by-round metrics "
             "are validation accuracy and validation cross-entropy loss. The pilot reserves a held-out test set but "
             "does not evaluate it (final_test_metrics is null). These experiments do not measure real satellite radio links or orbital motion."
             if is_measured else
-            "No measured experiment is currently selected. The map and coverage regions are illustrative, not orbital propagation or real contact calculations."
+            "The interactive prototype uses synthetic feature vectors and a lightweight classifier, not the measured EuroSAT CNN runs. "
+            "The map and coverage regions are illustrative, not orbital propagation or real contact calculations."
         ),
     }
 
@@ -561,7 +591,7 @@ def render_overview() -> None:
     result = get_current_result()
     cfg = result.get("config", {}) if result else {}
     metrics = result.get("metrics", {}) if result else {}
-    clients = int(cfg.get("num_clients", 4))
+    clients = int(cfg.get("num_clients", st.session_state.get("explore_clients", 4)))
     last_acc = metrics.get("global_accuracy", [])
     final_acc = float(last_acc[-1]) if last_acc else None
     participants = None
@@ -574,7 +604,7 @@ def render_overview() -> None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("Simulated satellites", clients)
     m2.metric("Clients available", f"{active_count}/{clients}")
-    m3.metric("Latest validation accuracy", f"{final_acc:.1%}" if final_acc is not None else "Not available")
+    m3.metric("Latest test accuracy", f"{final_acc:.1%}" if final_acc is not None else "Not run yet")
     m4.metric("Learning algorithm", "FedAvg")
 
     map_col, tutor_col = st.columns([1.65, 1])
@@ -600,20 +630,135 @@ def render_overview() -> None:
                 st.rerun()
             if result and final_acc is not None:
                 st.markdown("**Latest run insight**")
-                metric_split = "validation" if result.get("result_source") == "measured" else "model"
-                st.write(f"Global {metric_split} accuracy changed from {last_acc[0]:.1%} to {last_acc[-1]:.1%} over {cfg.get('rounds', len(last_acc)-1)} rounds.")
+                st.write(f"Global test accuracy changed from {last_acc[0]:.1%} to {last_acc[-1]:.1%} over {cfg.get('rounds', len(last_acc)-1)} rounds.")
             else:
                 st.markdown("**Start here**")
-                st.write("Choose Learn for the concepts, then open Explore & Results to select and compare the saved EuroSAT/FedAvg experiments. Knowledge Check contains scored questions with feedback.")
+                st.write("Choose Learn for the concepts, then open Explore & Results to run an experiment. Knowledge Check contains scored questions with feedback.")
 
     with st.container(border=True):
-        st.subheader("Reference model performance")
+        st.subheader("Recent model performance")
         if result:
             metrics_figure(result, compact=True)
         else:
-            st.write("Measured pilot curves are unavailable. Check that the experiments/results/pilot folder is included in the project.")
+            st.write("No experiment yet. Run one from Explore & Results to populate this panel.")
+            st.progress(0.0, text="Waiting for first training run")
 
-    st.caption("Experiment note: the displayed pilot curves are measured offline EuroSAT/CNN validation results. Client map markers are illustrative and do not represent propagated satellite orbits.")
+    st.caption("Prototype limitation: current FedAvg metrics use synthetic feature vectors and a linear classifier, not EuroSAT imagery/CNN. Client map markers are illustrative.")
+
+def reset_explore_settings() -> None:
+    """Reset Explore widgets via a Streamlit callback (before widgets rerender)."""
+    for key, value in EXPLORE_DEFAULTS.items():
+        st.session_state[key] = value
+
+
+def _client_preview_cards(preview: pd.DataFrame, max_clients: int = 8) -> None:
+    """Compact client histograms inspired by the project dashboard sketch."""
+    if preview.empty:
+        st.info("No client distribution is available yet.")
+        return
+    clients = list(preview["Satellite"].drop_duplicates())[:max_clients]
+    class_colors = px.colors.qualitative.Safe
+    for client in clients:
+        client_df = preview[preview["Satellite"] == client].copy()
+        if client_df.empty:
+            continue
+        dominant_row = client_df.loc[client_df["Samples"].idxmax()]
+        with st.container(border=True):
+            info_col, chart_col = st.columns([0.9, 1.45], vertical_alignment="center")
+            with info_col:
+                st.markdown(f"<div class='client-label'>🛰️ {client}</div>", unsafe_allow_html=True)
+                st.caption(f"{dominant_row['Class']} dominant")
+                st.caption(f"{int(client_df['Samples'].sum()):,} samples")
+            with chart_col:
+                fig = px.bar(client_df, x="Class", y="Samples", color="Class", color_discrete_sequence=class_colors)
+                fig.update_layout(
+                    showlegend=False, height=92, margin=dict(l=0, r=0, t=0, b=0),
+                    paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+                    xaxis=dict(showticklabels=False, title=None, showgrid=False, zeroline=False),
+                    yaxis=dict(showticklabels=False, title=None, showgrid=False, zeroline=False),
+                    bargap=0.16,
+                )
+                fig.update_traces(hovertemplate="%{x}<br>Samples: %{y}<extra></extra>")
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key=f"client_bar_{client}_{len(preview)}")
+
+
+def _dashboard_metric_charts(result: dict[str, Any] | None) -> None:
+    """Three concise charts matching the dashboard concept sketch."""
+    if not result:
+        cols = st.columns(3)
+        for col, title, message in [
+            (cols[0], "Global training loss", "Run an experiment to view loss by round."),
+            (cols[1], "Global model accuracy", "Run an experiment to view held-out accuracy."),
+            (cols[2], "Final accuracy comparison", "Run IID and non-IID experiments to compare them."),
+        ]:
+            with col, st.container(border=True):
+                st.markdown(f"<div class='panel-title'>{title}</div>", unsafe_allow_html=True)
+                st.caption(message)
+        return
+
+    metrics = result.get("metrics", {})
+    accuracy = metrics.get("global_accuracy", [])
+    loss = metrics.get("global_loss", [])
+    if not accuracy or not loss:
+        st.info("This result does not include global accuracy/loss histories.")
+        return
+    rounds = list(range(len(accuracy)))
+    col1, col2, col3 = st.columns([1, 1, .78])
+    with col1, st.container(border=True):
+        st.markdown("<div class='panel-title'>Global test loss</div>", unsafe_allow_html=True)
+        loss_df = pd.DataFrame({"Round": list(range(len(loss))), "Loss": loss})
+        fig = px.line(loss_df, x="Round", y="Loss", markers=True)
+        fig.update_traces(line=dict(color="#f05b55", width=2), marker=dict(size=3))
+        fig.update_yaxes(type="log", title=None, showgrid=True, gridcolor="#e4edf5")
+        fig.update_xaxes(title=None, showgrid=False)
+        fig.update_layout(height=205, margin=dict(l=4, r=4, t=4, b=4), showlegend=False,
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    with col2, st.container(border=True):
+        st.markdown("<div class='panel-title'>Global model accuracy</div>", unsafe_allow_html=True)
+        acc_df = pd.DataFrame({"Round": rounds, "Accuracy": accuracy})
+        fig = px.line(acc_df, x="Round", y="Accuracy", markers=True)
+        fig.update_traces(line=dict(color="#2478e5", width=2), marker=dict(size=3))
+        fig.update_yaxes(title=None, tickformat=".0%", rangemode="tozero", showgrid=True, gridcolor="#e4edf5")
+        fig.update_xaxes(title=None, showgrid=False)
+        fig.update_layout(height=205, margin=dict(l=4, r=4, t=4, b=4), showlegend=False,
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+    with col3, st.container(border=True):
+        st.markdown("<div class='panel-title'>Final accuracy</div>", unsafe_allow_html=True)
+        history = st.session_state.get("run_history", [])
+        by_partition: dict[str, dict[str, Any]] = {}
+        for run in history:
+            rcfg = run.get("config", {})
+            rmetrics = run.get("metrics", {})
+            partition_name = str(rcfg.get("partition", "Unknown"))
+            acc_values = rmetrics.get("global_accuracy", [])
+            if acc_values:
+                by_partition[partition_name] = {"Experiment": partition_name, "Accuracy": float(acc_values[-1])}
+        if len(by_partition) >= 2:
+            bar_df = pd.DataFrame(list(by_partition.values()))
+            palette = ["#2478e5" if name == "IID" else "#ef5b55" for name in bar_df["Experiment"]]
+            fig = px.bar(bar_df, x="Experiment", y="Accuracy", color="Experiment", color_discrete_sequence=palette)
+            fig.update_traces(text=[f"{v:.1%}" for v in bar_df["Accuracy"]], textposition="outside", cliponaxis=False)
+            caption = "Latest completed run for each partition in this session."
+        else:
+            cfg = result.get("config", {})
+            alpha_value = cfg.get("alpha", 0.3)
+            label = (f"{cfg.get('partition', 'Current')} α={alpha_value:.2g}"
+                     if isinstance(alpha_value, (float, int)) else str(cfg.get("partition", "Current")))
+            bar_df = pd.DataFrame({"Experiment": [label], "Accuracy": [float(accuracy[-1])]})
+            fig = px.bar(bar_df, x="Experiment", y="Accuracy", color="Experiment", color_discrete_sequence=["#2478e5"])
+            fig.update_traces(text=[f"{float(accuracy[-1]):.1%}"], textposition="outside", cliponaxis=False)
+            caption = "Run both IID and non-IID experiments to compare final accuracy here."
+        max_acc = float(bar_df["Accuracy"].max())
+        fig.update_yaxes(title=None, tickformat=".0%", range=[0, min(1.12, max(.25, max_acc * 1.22))], showgrid=True, gridcolor="#e4edf5")
+        fig.update_xaxes(title=None, tickangle=0)
+        fig.update_layout(height=205, margin=dict(l=4, r=4, t=4, b=18), showlegend=False,
+                          paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)")
+        st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False})
+        st.caption(caption)
+    st.caption("Accuracy is shown as a percentage of held-out test samples. Round 0 is the untrained baseline.")
+
 
 def _render_tutor_compact(result: dict[str, Any] | None, page: str = "Explore & Results") -> None:
     st.markdown("<div class='panel-title'>🤖 AI Tutor Assistant</div>", unsafe_allow_html=True)
@@ -631,10 +776,204 @@ def _render_tutor_compact(result: dict[str, Any] | None, page: str = "Explore & 
 
 
 def render_explore() -> None:
-    """One unified experiment workspace backed by saved measured EuroSAT runs."""
-    measured_result = render_measured_studies()
-    st.session_state["active_measured_result"] = measured_result
-    _render_tutor_compact(measured_result, "Explore & Results")
+    """Dashboard-style exploration page matching the brainstorming mockup."""
+    st.markdown(
+        """<div class='hero'><div class='eyebrow'>MODULE 02 · INTERACTIVE EXPERIMENT</div>
+<h1>🛰️ Explore & Results: Satellite Federated Learning</h1>
+<p>Compare offline measured EuroSAT/FedAvg studies, or open the lightweight interactive prototype.</p></div>""",
+        unsafe_allow_html=True,
+    )
+
+    explore_mode = st.radio(
+        "Experiment mode",
+        ["Measured parameter studies", "Interactive prototype"],
+        horizontal=True,
+        key="explore_mode",
+        help="Measured studies display Member A's saved 50-round EuroSAT experiments. The prototype runs a separate synthetic-data demo.",
+    )
+    if explore_mode == "Measured parameter studies":
+        measured_result = render_measured_studies()
+        st.session_state["active_measured_result"] = measured_result
+        _render_tutor_compact(measured_result, "Measured Parameter Studies")
+        return
+
+    st.session_state["active_measured_result"] = None
+    st.info("Interactive prototype: this mode runs a lightweight synthetic-feature FedAvg demonstration. It is separate from the measured EuroSAT results.")
+
+    # The left navigation remains in Streamlit's sidebar; controls occupy the
+    # left panel of the main canvas, as in the team's mockup.
+    controls_col, clients_col, map_col = st.columns([0.92, 1.15, 1.55], gap="small")
+    with controls_col, st.container(border=True):
+        st.markdown("<div class='panel-title'>⚙️ Simulation Controls</div>", unsafe_allow_html=True)
+        # CHANGED: no value=/index= here; defaults come from EXPLORE_DEFAULTS in session state
+        num_clients = st.select_slider("Number of satellites (K)", options=[2, 3, 4, 5, 6, 8], key="explore_clients")
+        partition = st.selectbox("Data distribution", ["Non-IID", "IID"], key="explore_partition")
+        alpha = st.slider("Dirichlet alpha (α)", min_value=0.05, max_value=2.0, step=0.05,
+                          disabled=(partition == "IID"), help="Smaller alpha usually creates more uneven class mixtures.", key="explore_alpha")
+        # CHANGED: max 5 to match the backend's cap
+        local_epochs = st.slider("Local epochs (E)", 1, 5, key="explore_epochs",
+                                 help="Local training passes per round (capped at 5 to keep runs fast).")
+        rounds = st.slider("Communication rounds (T)", 1, 30, key="explore_rounds")
+        participation = st.slider("Client contact availability", 0.25, 1.0, step=0.25,
+                                  help="Simplified participation rate, not a physical orbit/contact calculation.", key="explore_participation")
+        seed = st.number_input("Random seed", min_value=0, max_value=9999, step=1, key="explore_seed")
+        hypothesis = st.radio("Prediction: non-IID data will…", ["Probably have no effect", "May change convergence/performance", "Always lower accuracy"], key="explore_hypothesis")
+        run_clicked = st.button("▶  Run Simulation", type="primary", use_container_width=True)
+        st.button("↺ Reset controls", on_click=reset_explore_settings, use_container_width=True)
+        run_error_slot = st.empty()  # NEW: errors appear next to the controls
+
+    preview = pd.DataFrame(cached_preview(int(num_clients), partition, float(alpha), int(seed)))
+    with clients_col, st.container(border=True):
+        st.markdown("<div class='panel-title'>Satellite Clients · Local Data Distribution</div>", unsafe_allow_html=True)
+        st.caption("Live preview of each client's local samples for the current controls (no training).")
+        _client_preview_cards(preview, max_clients=int(num_clients))
+
+    result_before_run = st.session_state.get("last_result") or read_preset_results()
+    # A fixed, real run of the lightweight synthetic model gives the initial
+    # dashboard populated charts; it is clearly labelled as a reference run.
+    reference_result = cached_experiment(3, "Non-IID", 0.3, 10, 2, 42, 0.75)
+    participants = None
+    map_result = result_before_run or reference_result
+    if map_result:
+        participation_rounds = map_result.get("participation", {}).get("clients_per_round", [])
+        participants = participation_rounds[-1] if participation_rounds else None
+    with map_col, st.container(border=True):
+        st.markdown("<div class='panel-title'>Satellite Ground Tracks & Contact Regions</div>", unsafe_allow_html=True)
+        st.plotly_chart(map_figure(int(num_clients), participants, int(seed)), use_container_width=True, config={"displayModeBar": False}, key="explore_satellite_map")
+        st.caption("Illustrative positions and contact regions; not real orbital propagation.")
+
+    # A run is performed only when the user presses the button.
+    if run_clicked:
+        try:
+            started = time.perf_counter()
+            with st.spinner("Training local clients and aggregating FedAvg updates…"):
+                result = cached_experiment(int(num_clients), partition, float(alpha), int(rounds), int(local_epochs), int(seed), float(participation))
+            # NEW: honest timing and cache labelling
+            st.session_state.last_wall_clock = time.perf_counter() - started
+            st.session_state.last_run_was_cached = any(
+                r.get("config") == result.get("config") for r in st.session_state.run_history
+            )
+            st.session_state.last_result = result
+            st.session_state.run_history.append(result)
+            st.session_state.run_history = st.session_state.run_history[-6:]
+            st.session_state.last_hypothesis = hypothesis
+            st.session_state.last_hypothesis_correct = hypothesis == "May change convergence/performance"
+            st.rerun()
+        except Exception as exc:
+            run_error_slot.error(f"The simulation failed ({type(exc).__name__}: {exc}). Try different settings.")
+
+    st.markdown("### Training Performance")
+    current_result = st.session_state.get("last_result") or read_preset_results()
+    shown = current_result or reference_result
+
+    # NEW: illustrative-source banner
+    if shown and shown.get("result_source") != "measured":
+        st.warning("Illustrative example: these curves come from real FedAvg arithmetic on synthetic feature "
+                   "vectors, not measured EuroSAT/CNN training.")
+
+    # NEW: flag results that no longer match the controls
+    if current_result:
+        last_cfg = current_result.get("config", {})
+        form_cfg = {
+            "num_clients": int(num_clients), "partition": partition, "alpha": float(alpha),
+            "rounds": int(rounds), "local_epochs": int(local_epochs), "seed": int(seed),
+            "participation_rate": float(participation),
+        }
+        if any(last_cfg.get(k) != v for k, v in form_cfg.items()):
+            st.info("Controls have changed since this run. The results below belong to the previous configuration "
+                    "(see 'Experiment configuration'). Press Run Simulation to generate results for the new settings.")
+
+    if current_result:
+        _dashboard_metric_charts(current_result)
+    else:
+        st.caption("Reference curves below come from a fixed default run of the synthetic prototype; press Run Simulation to replace them with your selected settings.")
+        _dashboard_metric_charts(reference_result)
+
+    # Results live on this same page as the controls.
+    if current_result:
+        metrics = current_result.get("metrics", {})
+        cfg = current_result.get("config", {})
+        communication = current_result.get("communication", {})
+        accuracy_values = metrics.get("global_accuracy", [])
+        loss_values = metrics.get("global_loss", [])
+        st.markdown("### Results & interpretation")
+        r1, r2, r3, r4 = st.columns(4)
+        if accuracy_values:
+            r1.metric("Final test accuracy", f"{float(accuracy_values[-1]):.1%}",
+                      delta=f"{float(accuracy_values[-1]) - float(accuracy_values[0]):+.1%}")
+        else:
+            r1.metric("Final test accuracy", "—")
+        r2.metric("Final test loss", f"{float(loss_values[-1]):.3f}" if loss_values else "—")
+        r3.metric("Backend runtime", f"{float(current_result.get('runtime_seconds', 0)):.2f} s")
+        r4.metric("Client participation", f"{float(cfg.get('participation_rate', 1.0)):.0%}")
+        # NEW: cache + timing notes
+        if st.session_state.get("last_run_was_cached"):
+            st.caption("ⓘ Same settings as an earlier run: result reused from cache; backend runtime shown is from the original run.")
+        if st.session_state.get("last_wall_clock") is not None:
+            st.caption(f"Wall-clock time from Run press to result: {st.session_state.last_wall_clock:.2f} s "
+                       "(excludes chart rendering).")
+        st.caption(f"Run metadata · partition: {cfg.get('partition')} · α: {cfg.get('alpha')} · seed: {cfg.get('seed')} · "
+                   f"local epochs: {cfg.get('local_epochs')} · train samples: {sum(current_result.get('client_sizes', [])):,} · "
+                   f"source: {current_result.get('result_source', 'unknown')}")
+
+        with st.expander("Communication and compute estimates"):
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Model parameters", f"{int(communication.get('parameters', 0)):,}")
+            c2.metric("Estimated upload", f"{int(communication.get('estimated_upload_bytes_total', 0)):,} bytes")
+            c3.metric("Local example-epochs", f"{int(communication.get('local_example_epochs', 0)):,}")
+            st.caption("Simplified estimates for uncompressed float32 parameter uploads; they exclude protocol overhead, downlink, retransmission, and real radio constraints.")
+
+        if st.session_state.get("last_hypothesis"):
+            st.markdown("**Your prediction:** " + str(st.session_state.last_hypothesis))
+            if st.session_state.get("last_hypothesis_correct"):
+                st.success("Good hypothesis. Heterogeneity can change convergence and performance; the outcome depends on the data, model, and training settings.")
+            else:
+                st.info("A safer conclusion is that heterogeneity may change convergence/performance; it does not guarantee lower accuracy in every run.")
+
+        with st.expander("Experiment configuration and caveats"):
+            st.json(cfg)
+            st.write(current_result.get("note", ""))
+
+        if len(st.session_state.run_history) > 1:
+            st.markdown("**Compare recent runs**")
+            history_rows = []
+            for index, run in enumerate(st.session_state.run_history, start=1):
+                run_cfg = run.get("config", {})
+                run_metrics = run.get("metrics", {})
+                run_acc = run_metrics.get("global_accuracy", [])
+                run_loss = run_metrics.get("global_loss", [])
+                history_rows.append({
+                    "Run": index,
+                    "Partition": run_cfg.get("partition", "?"),
+                    "α": run_cfg.get("alpha", None),
+                    "Clients": run_cfg.get("num_clients", None),
+                    "Participation": run_cfg.get("participation_rate", 1.0),
+                    "Final accuracy": run_acc[-1] if run_acc else None,
+                    "Final loss": run_loss[-1] if run_loss else None,
+                })
+            history_df = pd.DataFrame(history_rows)
+            st.dataframe(history_df.style.format({"α": "{:.2f}", "Participation": "{:.0%}", "Final accuracy": "{:.1%}", "Final loss": "{:.3f}"}), use_container_width=True, hide_index=True)
+
+    class_col, tutor_col = st.columns([1.35, 1], gap="small")
+    with class_col, st.container(border=True):
+        st.markdown("<div class='panel-title'>Land-Cover Classes</div>", unsafe_allow_html=True)
+        st.caption("Class labels used by the current result. These are schematic cards, not real EuroSAT thumbnails.")
+        # CHANGED: built from the result's class list, not hardcoded
+        class_names = (shown or {}).get("class_names", CLASS_NAMES)
+        for row_start in range(0, len(class_names), 5):
+            row = class_names[row_start:row_start + 5]
+            for col, label in zip(st.columns(5), row):
+                emoji, color = CLASS_STYLE.get(label, ("🛰️", "#f7fbff"))
+                with col:
+                    st.markdown(
+                        f"<div class='land-card' style='background:{color}'><div class='land-emoji'>{emoji}</div>"
+                        f"<div style='font-size:.70rem;font-weight:700;color:#28445f'>{label}</div></div>",
+                        unsafe_allow_html=True,
+                    )
+    with tutor_col, st.container(border=True):
+        _render_tutor_compact(current_result, "Explore & Results")
+
+    st.caption("Prototype note: training currently uses synthetic feature vectors and a linear softmax classifier, not actual EuroSAT images/CNN. Contact areas and satellite positions are illustrative.")
 
 
 def render_research() -> None:
@@ -654,9 +993,9 @@ def render_research() -> None:
 
     st.subheader("Demonstration status")
     status_df = pd.DataFrame([
-        {"Concept": "IID / non-IID data partitioning", "Status": "Measured EuroSAT parameter study available"},
-        {"Concept": "FedAvg training loop", "Status": "Measured offline EuroSAT/CNN experiments displayed"},
-        {"Concept": "Intermittent participation", "Status": "Measured client participation schedules available"},
+        {"Concept": "IID / non-IID data partitioning", "Status": "Implemented in prototype"},
+        {"Concept": "FedAvg training loop", "Status": "Implemented on synthetic features"},
+        {"Concept": "Intermittent participation", "Status": "Simplified participation model"},
         {"Concept": "Orbital visibility", "Status": "Illustrative map only"},
         {"Concept": "FedProx / FedAsync / SatSFL", "Status": "Research direction, not implemented"},
     ])
@@ -719,7 +1058,7 @@ def main() -> None:
             render_research()
 
         st.divider()
-        st.caption("Satellite FL Explorer · Educational toolkit · measured offline EuroSAT/FedAvg studies unless otherwise stated")
+        st.caption("Satellite FL Explorer · Educational prototype · synthetic benchmark unless otherwise stated")
 
 
 if __name__ == "__main__":

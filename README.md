@@ -6,7 +6,7 @@ A Streamlit educational dashboard for federated learning in satellite networks.
 
 - **Overview**: navigation cards, conceptual satellite dashboard, and local Ollama tutor.
 - **Learn**: guided explanations of FedAvg, IID/non-IID data, and satellite constraints.
-- **Explore & Results**: one experiment workspace. Study and parameter-value controls select the matching saved measured EuroSAT/FedAvg runs; accuracy, loss, round inspection, and supporting client data update from those files.
+- **Explore & Results**: measured pilot studies and a separate lightweight interactive prototype.
 - **Knowledge Check**: scored multiple-choice questions with feedback.
 - **Research**: literature directions and advanced satellite-FL concepts.
 
@@ -24,11 +24,9 @@ The repository includes Member A's offline FedAvg results under `experiments/res
 
 **Metric caveat:** the pilot round curves are validation accuracy and validation cross-entropy loss. `final_test_metrics` is null; the reserved test split was not evaluated in these pilot runs. Do not label validation curves as test accuracy. These are offline sequential simulations, not measurements from real satellites, orbital passes, or radio links.
 
-## Unified measured experiment explorer
+## Interactive prototype
 
-The Explore & Results page uses one set of study and parameter-value controls to select the corresponding saved measured runs. Choose one parameter study (for example, client count or local epochs), then select one or more measured values to display. The selected values determine which validation accuracy/loss curves and supporting client-level data are displayed. Each study varies one parameter while the other recorded settings remain fixed, as documented in its study description.
-
-The page does not retrain models, interpolate between saved values, or invent curves for unmeasured configurations. The old synthetic prototype is no longer exposed as a separate experiment mode in the user interface. The Overview dashboard now uses a saved IID validation run as its reference until a learner selects another measured configuration.
+The separate Interactive prototype mode runs a lightweight FedAvg example on synthetic features. It is deliberately distinguished from the measured EuroSAT CNN experiments.
 
 ## Run locally
 
@@ -49,8 +47,8 @@ The app can use a local Ollama model through the configured Ollama endpoint. For
 ## Repository layout
 
 - `app.py`: main Streamlit application and page routing.
-- `backend/`: model/class metadata and the retained lightweight baseline implementation.
-- `interface/`: Learn and measured-study visualization components. `measured_studies.py` loads the saved pilot index, round curves, and per-run JSON files.
+- `backend/`: lightweight interactive prototype and measured-results data access helpers.
+- `interface/`: Learn and measured-study visualization components.
 - `content/`: quiz questions and explanations.
 - `experiments/results/pilot/`: immutable offline measured experiment package.
 

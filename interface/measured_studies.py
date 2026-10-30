@@ -318,527 +318,181 @@ def _make_tutor_result(row: pd.Series, run: dict[str, Any], selected_round: int)
             "global_accuracy": [float(item.get("accuracy", 0.0)) for item in rounds],
             "global_loss": [float(item.get("loss", 0.0)) for item in rounds],
         },
-        "participation": {
-            "clients_per_round": [item.get("participating_clients", []) for item in rounds],
-        },
-        "client_sizes": run.get("client_sample_counts", []),
-        "class_names": run.get("classes", []),
-        "client_class_counts": run.get("client_class_counts", []),
-        "runtime_seconds": float(run.get("total_elapsed_seconds", 0.0)),
         "round_metric_split": run.get("round_metric_split", "validation"),
         "final_test_metrics": run.get("final_test_metrics"),
     }
 
 
-def load_default_measured_result() -> dict[str, Any] | None:
-    """Return a deterministic measured run for overview/tutor context before selection."""
-    try:
-        index = load_pilot_index()
-        rows = index[index["study"] == "alpha"]
-        if rows.empty:
-            return None
-        row = rows[rows["case"].astype(str) == "IID"]
-        if row.empty:
-            row = rows.iloc[[0]]
-        selected = row.iloc[0]
-        run = load_run_json(str(selected["json_path"]))
-        rounds = run.get("round_metrics", [])
-        last_round = max((int(item.get("round", 0)) for item in rounds), default=0)
-        return _make_tutor_result(selected, run, last_round)
-    except Exception:
-        return None
-
-
-def _satellite_map_figure(
-    run: dict[str, Any], selected_round: int, participants: list[int] | None = None
-) -> go.Figure:
-    """Map the selected measured run's clients and round participation.
-
-    Geographic positions and coverage ellipses are schematic only. The client
-    count and participating-client status come from the selected saved run.
-    """
-    config = run.get("config", {})
-    n_clients = int(config.get("num_clients", len(run.get("client_sample_counts", [])) or 1))
-    n_clients = max(1, min(n_clients, 32))
-    active = {int(x) for x in (participants or [])}
-
-    # Fixed illustrative positions, extended deterministically for larger K.
-    base_points = [
-        (58, -150), (34, -112), (12, -78), (-20, -62), (52, -35),
-        (24, 8), (-18, 33), (42, 72), (9, 105), (-27, 134),
-        (52, 151), (67, 45), (-43, 172), (2, 158), (31, 28), (-5, -12),
-    ]
-    points = list(base_points[:n_clients])
-    # The pilot only uses up to 16 clients; this deterministic extension keeps
-    # the function safe if future experiments add more clients.
-    if n_clients > len(points):
-        for i in range(len(points), n_clients):
-            lat = -62 + ((i * 29) % 124)
-            lon = -170 + ((i * 47) % 340)
-            points.append((lat, lon))
-
-    palette = [
-        "#3977e8", "#43b978", "#f0a21a", "#df6558", "#8866c7", "#18a6b3",
-        "#c35b98", "#6f879c", "#8b9b32", "#d17d36", "#387f8e", "#ba6e9f",
-        "#4c8b50", "#9262b5", "#b67c2d", "#3f83bb",
-    ]
-    ground_lat, ground_lon = 39.7, -104.9  # illustrative reference ground station
-    fig = go.Figure()
-
-    # Soft coverage ellipses are visual guides, not calculated RF footprints.
-    angles = np.linspace(0, 2 * np.pi, 64)
-    for i, (lat, lon) in enumerate(points):
-        radius_lat = 7.5
-        radius_lon = radius_lat / max(0.45, np.cos(np.radians(lat)))
-        ring_lat = np.clip(lat + radius_lat * np.sin(angles), -88, 88)
-        ring_lon = ((lon + radius_lon * np.cos(angles) + 180) % 360) - 180
-        fig.add_trace(go.Scattergeo(
-            lat=list(ring_lat) + [float(ring_lat[0])],
-            lon=list(ring_lon) + [float(ring_lon[0])],
-            mode="lines", fill="toself",
-            fillcolor="rgba(" + ",".join(str(int(palette[i % len(palette)][j:j+2], 16)) for j in (1, 3, 5)) + ",0.10)",
-            line=dict(color=palette[i % len(palette)], width=0.8),
-            hoverinfo="skip", showlegend=False,
-        ))
-
-    # Links are highlighted only for clients recorded in this round's run log.
-    link_lat, link_lon = [], []
-    for idx in sorted(active):
-        if 0 <= idx < n_clients:
-            lat, lon = points[idx]
-            link_lat.extend([ground_lat, lat, None])
-            link_lon.extend([ground_lon, lon, None])
-    if link_lat:
-        fig.add_trace(go.Scattergeo(
-            lat=link_lat, lon=link_lon, mode="lines", name="Participated this round",
-            line=dict(color="#38a89b", width=1.8), opacity=0.85,
-            hoverinfo="skip",
-        ))
-
-    # All clients remain visible; active clients use their color, others are grey.
-    for i, (lat, lon) in enumerate(points):
-        participating = i in active
-        status = "Participated in selected round" if participating else "Did not participate in selected round"
-        marker_color = palette[i % len(palette)] if participating else "#a9b5c2"
-        fig.add_trace(go.Scattergeo(
-            lat=[lat], lon=[lon], mode="markers+text", text=[f"S{i + 1}"],
-            textposition="top center", name=f"Satellite {i + 1}",
-            hovertemplate=(f"Satellite {i + 1}<br>{status}<extra></extra>"),
-            marker=dict(size=11, color=marker_color, line=dict(width=1.5, color="white")),
-            showlegend=False,
-        ))
-
-    fig.add_trace(go.Scattergeo(
-        lat=[ground_lat], lon=[ground_lon], mode="markers+text", text=["Ground station"],
-        textposition="bottom center", name="Ground station",
-        hovertemplate="Illustrative ground station<extra></extra>",
-        marker=dict(size=14, symbol="diamond", color="#3659b5", line=dict(width=1.5, color="white")),
-    ))
-    fig.update_geos(
-        scope="world", projection_type="natural earth",
-        showland=True, landcolor="#e3ebdf",
-        showocean=True, oceancolor="#eaf3fc",
-        showcoastlines=True, coastlinecolor="#9db2c5",
-        showcountries=True, countrycolor="#c4d0d8",
-        showlakes=True, lakecolor="#eaf3fc",
-        bgcolor="#f7fbff",
-    )
-    fig.update_layout(
-        title=f"{n_clients} simulated satellite clients · round {selected_round}",
-        height=355, margin=dict(l=4, r=4, t=45, b=4),
-        paper_bgcolor="white", plot_bgcolor="white",
-        legend=dict(orientation="h", yanchor="bottom", y=-0.08, xanchor="left", x=0),
-    )
-    return fig
-
-
-def _selected_round_record(run: dict[str, Any], selected_round: int) -> dict[str, Any] | None:
-    return next(
-        (item for item in run.get("round_metrics", [])
-         if int(item.get("round", -1)) == int(selected_round)),
-        None,
-    )
-
-
-@st.cache_data(show_spinner=False)
-def load_core_configuration_catalog() -> pd.DataFrame:
-    """Return unique measured runs for the K/E/data-distribution control grid.
-
-    Only the controlled baseline family is included: EuroSAT RGB, 3,000 train
-    images, 500 validation images, 50 rounds, full participation, seed 42.
-    Other studies (participation and training-set size) intentionally remain
-    separate because their fixed settings differ.
-    """
-    manifest = load_pilot_manifest()
-    index = load_pilot_index()
-    index_by_path = {str(row["json_path"]): row for _, row in index.iterrows()}
-    records: list[dict[str, Any]] = []
-    for item in manifest:
-        cfg = item.get("config", {})
-        if cfg.get("dataset") != "EuroSAT RGB":
-            continue
-        if int(cfg.get("train_limit", -1)) != 3000:
-            continue
-        if int(cfg.get("validation_limit", -1)) != 500:
-            continue
-        if int(cfg.get("rounds", -1)) != 50 or int(cfg.get("seed", -1)) != 42:
-            continue
-        if not np.isclose(float(cfg.get("participation_rate", 0.0)), 1.0):
-            continue
-        if int(cfg.get("num_clients", 0)) not in (2, 4, 8, 16):
-            continue
-        if int(cfg.get("local_epochs", 0)) not in (1, 2, 5):
-            continue
-        partition = str(cfg.get("partition", "")).lower()
-        if partition not in ("iid", "dirichlet"):
-            continue
-        alpha = cfg.get("alpha")
-        if partition == "iid":
-            alpha = None
-        else:
-            if alpha is None:
-                continue
-            alpha = float(alpha)
-        path = str(item["json_path"])
-        index_row = index_by_path.get(path)
-        if index_row is None:
-            continue
-        distribution_label = "IID" if partition == "iid" else f"Dirichlet α={alpha:g}"
-        combo_label = (
-            f"{int(cfg['num_clients'])} satellites · {int(cfg['local_epochs'])} epoch(s) · {distribution_label}"
-        )
-        record = index_row.to_dict()
-        record.update({
-            "num_clients": int(cfg["num_clients"]),
-            "local_epochs": int(cfg["local_epochs"]),
-            "partition": partition,
-            "alpha": alpha,
-            "train_images": int(cfg["train_limit"]),
-            "validation_images": int(cfg["validation_limit"]),
-            "participation_rate": float(cfg["participation_rate"]),
-            "rounds": int(cfg["rounds"]),
-            "seed": int(cfg["seed"]),
-            "combo_label": combo_label,
-            "combo_key": f"K{int(cfg['num_clients'])}_E{int(cfg['local_epochs'])}_{partition}_{'iid' if alpha is None else f'{alpha:g}'}",
-        })
-        records.append(record)
-
-    if not records:
-        return pd.DataFrame()
-
-    # The K=4, E=1, alpha=2.0 baseline appears in both the client and epoch
-    # studies. Keep one canonical row so the combination is not duplicated.
-    priority = {"clients": 0, "epochs": 1, "alpha": 2}
-    records.sort(key=lambda r: (priority.get(str(r.get("study")), 9), str(r["json_path"])))
-    unique: dict[str, dict[str, Any]] = {}
-    for record in records:
-        unique.setdefault(str(record["combo_key"]), record)
-    frame = pd.DataFrame(list(unique.values()))
-    return frame.sort_values(["num_clients", "local_epochs", "partition", "alpha"], na_position="first").reset_index(drop=True)
-
-
-def _build_curves_from_runs(rows: pd.DataFrame) -> pd.DataFrame:
-    """Build chart rows directly from measured JSON run histories."""
-    output: list[dict[str, Any]] = []
-    for _, row in rows.iterrows():
-        run = load_run_json(str(row["json_path"]))
-        label = str(row["combo_label"])
-        for metric in run.get("round_metrics", []):
-            output.append({
-                "case": label,
-                "round": int(metric.get("round", 0)),
-                "validation_accuracy": float(metric.get("accuracy", np.nan)),
-                "validation_loss": float(metric.get("loss", np.nan)),
-            })
-    return pd.DataFrame(output)
-
-
-def _format_distribution(partition: str, alpha: Any) -> str:
-    return "IID" if partition == "iid" else f"Dirichlet non-IID (α = {float(alpha):g})"
-
-
 def render_measured_studies() -> dict[str, Any] | None:
-    """Render a combined K / local-epochs / distribution selector.
-
-    The selected triplet is matched to an exact saved offline experiment.
-    Missing combinations are reported as unavailable; no interpolation,
-    synthetic curve, or new training run is substituted.
-    """
+    """Render the saved, measured 50-round parameter studies; return tutor context."""
     st.markdown(
-        "<div class='hero'><div class='eyebrow'>MODULE 02 · EXPERIMENT EXPLORER</div>"
-        "<h1>🛰️ Explore & Results: Satellite Federated Learning</h1>"
-        "<p>Choose the number of satellites, local epochs, and data distribution together. "
-        "The dashboard displays an exact saved EuroSAT/FedAvg run when one exists.</p></div>",
+        "<div class='hero'><div class='eyebrow'>MODULE 02 · MEASURED EXPERIMENTS</div>"
+        "<h1>Measured Satellite FL Studies</h1>"
+        "<p>Compare saved FedAvg experiments. Curves below are loaded from Member A's offline runs; no model is retrained here.</p></div>",
         unsafe_allow_html=True,
     )
-
     try:
-        catalog = load_core_configuration_catalog()
+        index = load_pilot_index()
     except Exception as exc:
         st.error(f"Measured experiment data could not be loaded: {type(exc).__name__}: {exc}")
-        return None
-    if catalog.empty:
-        st.error("No measured baseline configurations were found in experiments/results/pilot/.")
+        st.info("Check that experiments/results/pilot/ contains index.csv, manifest.json, and the five study folders.")
         return None
 
-    control_col, clients_col, map_col = st.columns([0.92, 1.18, 1.72], gap="small")
-    with control_col:
-        with st.container(border=True):
-            st.markdown("<div class='panel-title'>⚙️ Simulation Controls</div>", unsafe_allow_html=True)
-            selected_k = st.selectbox(
-                "Number of satellites (K)", [2, 4, 8, 16], index=1, key="combo_num_satellites"
-            )
-            selected_epochs = st.selectbox(
-                "Local epochs (E)", [1, 2, 5], index=0, key="combo_local_epochs"
-            )
-            distribution_mode = st.selectbox(
-                "Data distribution", ["IID", "Non-IID (Dirichlet)"], index=1,
-                key="combo_distribution_mode",
-            )
-            if distribution_mode == "IID":
-                selected_partition = "iid"
-                selected_alpha = None
-                st.caption("IID uses a broadly balanced class distribution; no Dirichlet α applies.")
-            else:
-                selected_partition = "dirichlet"
-                selected_alpha = st.selectbox(
-                    "Dirichlet concentration (α)", [0.1, 0.2, 0.6, 1.0, 2.0], index=1,
-                    format_func=lambda x: f"{x:g}", key="combo_alpha",
-                    help="Smaller α generally creates more uneven class mixtures across clients.",
-                )
+    study_key = st.selectbox(
+        "Parameter study",
+        options=list(STUDIES),
+        format_func=lambda key: STUDIES[key]["label"],
+        key="measured_study_key",
+    )
+    study_meta = STUDIES[study_key]
+    study_rows = index[index["study"] == study_key].copy()
+    if study_rows.empty:
+        st.warning("No measured runs are indexed for this study.")
+        return None
+    available_cases = _format_case_order(study_key, study_rows["case"].astype(str).tolist())
 
-            st.markdown("**Other settings held fixed**")
-            st.caption("3,000 training images · 500 validation images · 100% client participation · 50 rounds · seed 42")
-            st.caption(f"{len(catalog)} of 72 possible K / epoch / distribution combinations currently have saved results.")
-            st.caption("The controls select measured runs. They do not retrain the CNN.")
-            with st.expander("Show currently available measured combinations"):
-                availability_view = catalog[["combo_label", "study", "json_path"]].rename(columns={
-                    "combo_label": "Measured combination", "study": "Original parameter study", "json_path": "Result file"
-                })
-                st.dataframe(availability_view, use_container_width=True, hide_index=True)
+    st.markdown(f"### {study_meta['parameter']}")
+    st.write(study_meta["description"])
+    st.caption(f"Experimental controls held fixed: {study_meta['fixed']}")
 
-    # Match all three user-selected parameters against an exact recorded run.
-    matches = catalog[
-        (catalog["num_clients"].astype(int) == int(selected_k))
-        & (catalog["local_epochs"].astype(int) == int(selected_epochs))
-        & (catalog["partition"].astype(str) == selected_partition)
-    ].copy()
-    if selected_partition == "iid":
-        matches = matches[matches["alpha"].isna()]
-    else:
-        matches = matches[
-            matches["alpha"].notna()
-            & np.isclose(pd.to_numeric(matches["alpha"], errors="coerce"), float(selected_alpha))
-        ]
+    selected_cases = st.multiselect(
+        "Configurations to compare",
+        options=available_cases,
+        default=available_cases,
+        key=f"measured_cases_{study_key}",
+        help="Each selected line is an actual saved experiment. Unselected configurations are hidden, not recomputed.",
+    )
+    if not selected_cases:
+        st.info("Select at least one configuration to display its measured curves.")
+        return None
 
-    focus_run: dict[str, Any] | None = None
-    focus_row: pd.Series | None = None
-    selected_round = 50
-    participants: list[int] = []
-    cfg: dict[str, Any] = {
-        "num_clients": int(selected_k),
-        "local_epochs": int(selected_epochs),
-        "partition": selected_partition,
-        "alpha": selected_alpha,
-        "train_limit": 3000,
-        "validation_limit": 500,
-        "participation_rate": 1.0,
-        "rounds": 50,
-        "seed": 42,
-    }
-
-    if not matches.empty:
-        # Catalog is deduplicated; this should resolve to exactly one run.
-        focus_row = matches.iloc[0]
-        try:
-            focus_run = load_run_json(str(focus_row["json_path"]))
-            cfg = focus_run.get("config", cfg)
-        except Exception as exc:
-            st.error(f"Could not load the matching measured run: {type(exc).__name__}: {exc}")
-            focus_run = None
-
-    with control_col:
-        if focus_run is not None:
-            st.success("Exact measured configuration available")
-            st.caption(str(focus_row["combo_label"]))
-            max_round = max(
-                (int(item.get("round", 0)) for item in focus_run.get("round_metrics", [])),
-                default=50,
-            )
-            selected_round = st.slider(
-                "Communication round", min_value=0, max_value=max_round,
-                value=min(50, max_round), step=1, key="combo_selected_round",
-                help="The selected round updates the map participation and the round-level metrics.",
-            )
-            round_record = _selected_round_record(focus_run, selected_round)
-            participants = (round_record or {}).get("participating_clients", [])
-        else:
-            st.warning("No measured data for this combination yet.")
-            st.caption("Member A can add this exact K / epoch / distribution combination in a future experiment batch.")
-            st.caption("No curve, client distribution, or participation schedule is estimated or substituted.")
-            st.slider(
-                "Communication round (no saved run)", min_value=0, max_value=50,
-                value=50, step=1, disabled=True, key="combo_selected_round_missing",
-            )
-
-    # Optional comparisons: only actual runs from the same 3,000-image baseline catalog.
-    comparison_rows = pd.DataFrame()
-    if focus_run is not None and focus_row is not None:
-        other_catalog = catalog[catalog["combo_key"] != str(focus_row["combo_key"])].copy()
-        with st.expander("Compare with other measured configurations", expanded=False):
-            comparison_labels = st.multiselect(
-                "Additional saved configurations",
-                options=other_catalog["combo_label"].tolist(),
-                default=[], key="combo_comparison_labels",
-                help="Only measured configurations in the supplied results package are available.",
-            )
-        comparison_rows = other_catalog[other_catalog["combo_label"].isin(comparison_labels)].copy()
-        selected_rows = pd.concat([matches, comparison_rows], ignore_index=True).drop_duplicates("combo_key")
-    else:
-        selected_rows = pd.DataFrame()
-
-    with clients_col:
-        with st.container(border=True):
-            st.markdown("<div class='panel-title'>🛰️ Satellite Clients · Local Data Distribution</div>", unsafe_allow_html=True)
-            if focus_run is not None:
-                st.caption("Actual class counts from the selected measured run.")
-                dist_fig = _client_distribution_figure(focus_run)
-                if dist_fig:
-                    dist_fig.update_layout(height=355, margin=dict(l=4, r=4, t=35, b=4), legend_title_text="Class")
-                    st.plotly_chart(dist_fig, use_container_width=True, config={"displayModeBar": False}, key="combo_measured_distribution")
-                else:
-                    st.info("This measured run does not include per-client class counts.")
-                client_sizes = focus_run.get("client_sample_counts", [])
-                if client_sizes:
-                    total = sum(int(x) for x in client_sizes)
-                    st.caption(" · ".join(f"Sat {i+1}: {int(n):,}" for i, n in enumerate(client_sizes)))
-                    st.caption(f"{total:,} training images distributed across {len(client_sizes)} satellites.")
-            else:
-                st.info("No measured client distribution is available for the selected combination.")
-                st.caption("The distribution chart will populate when Member A supplies this run's client-level class counts.")
-
-    with map_col:
-        with st.container(border=True):
-            st.markdown("<div class='panel-title'>🌍 Satellite Ground Tracks & Contact Regions</div>", unsafe_allow_html=True)
-            # Always render the requested number of clients. If no measured run
-            # exists, render neutral markers without claiming participation data.
-            map_run = focus_run or {"config": {"num_clients": int(selected_k)}}
-            map_fig = _satellite_map_figure(map_run, selected_round, participants)
-            st.plotly_chart(map_fig, use_container_width=True, config={"displayModeBar": False}, key="combo_measured_map")
-            if focus_run is not None:
-                active_n = len(participants)
-                st.caption(
-                    f"Round {selected_round}: {active_n}/{int(cfg.get('num_clients', selected_k))} clients participated. "
-                    "Client status comes from the selected saved run; positions and coverage areas are illustrative, not real orbital propagation."
-                )
-            else:
-                st.caption(
-                    f"Showing {int(selected_k)} requested satellite markers only. No participation data exist for this combination yet. "
-                    "Positions and coverage areas are illustrative."
-                )
-
-    st.markdown("### Measured training performance")
-    if focus_run is None or focus_row is None:
-        st.warning(
-            f"No saved experiment matches K={selected_k}, E={selected_epochs}, "
-            f"{_format_distribution(selected_partition, selected_alpha)}. "
-            "Change one of the controls to a measured configuration, or wait for the missing combination to be added."
-        )
-        available_for_k_e = catalog[
-            (catalog["num_clients"].astype(int) == int(selected_k))
-            & (catalog["local_epochs"].astype(int) == int(selected_epochs))
-        ]
-        if not available_for_k_e.empty:
-            st.markdown("**Measured distributions currently available for this satellite/epoch setting:**")
-            st.write(" · ".join(
-                _format_distribution(str(row["partition"]), row["alpha"])
-                for _, row in available_for_k_e.iterrows()
-            ))
-        else:
-            st.caption("There are currently no measured runs for this exact satellite-count and local-epoch pair.")
-        st.session_state["active_measured_result"] = {
-            "result_source": "unavailable",
-            "config": cfg,
-            "metrics": {},
-            "availability_note": "No exact measured configuration exists in the current pilot package.",
-        }
-        return st.session_state["active_measured_result"]
-
+    selected_rows = study_rows[study_rows["case"].astype(str).isin(selected_cases)].copy()
     try:
-        selected_curves = _build_curves_from_runs(selected_rows)
+        curves = load_study_curves(study_key)
+        selected_curves = curves[curves["case"].astype(str).isin(selected_cases)].copy()
     except Exception as exc:
-        st.error(f"Could not build measured comparison curves: {type(exc).__name__}: {exc}")
+        st.error(f"Could not load measured curves: {type(exc).__name__}: {exc}")
         return None
     if selected_curves.empty:
-        st.warning("The selected measured JSON files contain no round histories.")
+        st.warning("No saved curve rows match the selected configurations. No placeholder curves have been generated.")
         return None
 
-    st.caption(
-        f"Selected: K={selected_k} satellites · E={selected_epochs} local epoch(s) · "
-        f"{_format_distribution(selected_partition, selected_alpha)}. "
-        "Additional comparison curves, if selected, are other exact saved runs."
+    # A compact end-of-study comparison complements the full round-by-round curves.
+    summary_columns = [
+        ("case", "Configuration"),
+        ("final_validation_accuracy", "Final validation accuracy"),
+        ("final_validation_loss", "Final validation loss"),
+        ("total_elapsed_seconds", "Recorded run time (s)"),
+    ]
+    summary_columns = [(source, label) for source, label in summary_columns if source in selected_rows.columns]
+    summary = selected_rows[[source for source, _ in summary_columns]].rename(
+        columns={source: label for source, label in summary_columns}
     )
+    st.markdown("#### Selected run summary · round 50")
+    st.dataframe(
+        summary.style.format({
+            "Final validation accuracy": "{:.1%}",
+            "Final validation loss": "{:.4f}",
+            "Recorded run time (s)": "{:.1f} s",
+        }),
+        use_container_width=True,
+        hide_index=True,
+    )
+
+    max_round = int(selected_curves["round"].max())
+    selected_round = st.slider(
+        "Inspect communication round",
+        min_value=0, max_value=max_round, value=max_round, step=1,
+        key=f"measured_round_{study_key}",
+        help="Round 0 is the untrained initial global model; round 1 is the first aggregation.",
+    )
+
     acc_col, loss_col = st.columns(2, gap="medium")
     with acc_col:
-        st.plotly_chart(
-            _make_curve_figure(selected_curves, "validation_accuracy", selected_round),
-            use_container_width=True, config={"displayModeBar": False}, key="combo_measured_accuracy",
-        )
+        st.plotly_chart(_make_curve_figure(selected_curves, "validation_accuracy", selected_round),
+                        use_container_width=True, config={"displayModeBar": False}, key=f"measured_acc_{study_key}")
     with loss_col:
-        st.plotly_chart(
-            _make_curve_figure(selected_curves, "validation_loss", selected_round),
-            use_container_width=True, config={"displayModeBar": False}, key="combo_measured_loss",
-        )
+        st.plotly_chart(_make_curve_figure(selected_curves, "validation_loss", selected_round),
+                        use_container_width=True, config={"displayModeBar": False}, key=f"measured_loss_{study_key}")
 
-    # Summaries are taken from the saved JSON histories and the index metadata.
-    summary_records: list[dict[str, Any]] = []
-    round_records: list[dict[str, Any]] = []
-    for _, row in selected_rows.iterrows():
-        run = load_run_json(str(row["json_path"]))
-        round_item = _selected_round_record(run, selected_round)
-        history = run.get("round_metrics", [])
-        last = history[-1] if history else {}
-        summary_records.append({
-            "Configuration": row["combo_label"],
-            "Final validation accuracy": float(last.get("accuracy", np.nan)),
-            "Final validation loss": float(last.get("loss", np.nan)),
-            "Recorded runtime (s)": float(run.get("total_elapsed_seconds", np.nan)),
-        })
-        if round_item:
-            round_records.append({
-                "Configuration": row["combo_label"],
-                "Validation accuracy": float(round_item.get("accuracy", np.nan)),
-                "Validation loss": float(round_item.get("loss", np.nan)),
-                "Participating clients": len(round_item.get("participating_clients", [])),
-                "Elapsed seconds": float(round_item.get("elapsed_seconds", np.nan)),
-            })
-    st.markdown("#### Final-round comparison")
-    st.dataframe(pd.DataFrame(summary_records).style.format({
-        "Final validation accuracy": "{:.1%}",
-        "Final validation loss": "{:.4f}",
-        "Recorded runtime (s)": "{:.1f} s",
-    }), use_container_width=True, hide_index=True)
+    round_rows = selected_curves[selected_curves["round"] == selected_round].copy()
+    round_rows = round_rows.rename(columns={
+        "case": "Configuration",
+        "validation_accuracy": "Validation accuracy",
+        "validation_loss": "Validation loss",
+        "client_count": "Participating clients",
+        "participating_samples": "Participating images",
+        "local_optimizer_steps": "Local optimizer steps",
+        "elapsed_seconds": "Elapsed seconds",
+    })
+    display_cols = [c for c in ["Configuration", "Validation accuracy", "Validation loss", "Participating clients",
+                                "Participating images", "Local optimizer steps", "Elapsed seconds"] if c in round_rows.columns]
+    st.markdown(f"#### Comparison at round {selected_round}")
+    st.dataframe(
+        round_rows[display_cols].style.format({
+            "Validation accuracy": "{:.1%}", "Validation loss": "{:.4f}", "Elapsed seconds": "{:.1f} s",
+            "Participating images": "{:,.0f}", "Local optimizer steps": "{:,.0f}",
+        }),
+        use_container_width=True, hide_index=True,
+    )
 
-    st.markdown(f"#### Selected-round comparison · round {selected_round}")
-    if round_records:
-        st.dataframe(pd.DataFrame(round_records).style.format({
-            "Validation accuracy": "{:.1%}",
-            "Validation loss": "{:.4f}",
-            "Elapsed seconds": "{:.1f} s",
-        }), use_container_width=True, hide_index=True)
+    case_for_detail = st.selectbox(
+        "Inspect one configuration in detail",
+        options=selected_cases,
+        index=0,
+        key=f"measured_focus_{study_key}",
+    )
+    focus_row = selected_rows[selected_rows["case"].astype(str) == case_for_detail].iloc[0]
+    try:
+        focus_run = load_run_json(str(focus_row["json_path"]))
+    except Exception as exc:
+        st.error(f"Could not load detailed run: {type(exc).__name__}: {exc}")
+        return None
 
-    with st.expander("Inspect the full 50-round client participation schedule"):
-        heatmap = _participation_heatmap(focus_run)
-        if heatmap:
-            st.plotly_chart(heatmap, use_container_width=True, config={"displayModeBar": False}, key="combo_participation_heatmap")
-        else:
-            st.info("No per-round participation schedule is included in this run.")
-    with st.expander("Inspect local computation per round"):
-        compute_fig = _local_compute_figure(selected_rows)
-        if compute_fig:
-            st.plotly_chart(compute_fig, use_container_width=True, config={"displayModeBar": False}, key="combo_local_compute")
-        else:
-            st.info("No client-level optimizer-step records are included in these runs.")
+    rm = next((item for item in focus_run.get("round_metrics", []) if int(item.get("round", -1)) == selected_round), None)
+    cfg = focus_run.get("config", {})
+    r1, r2, r3, r4 = st.columns(4)
+    r1.metric("Validation accuracy", f"{float(rm['accuracy']):.1%}" if rm else "—")
+    r2.metric("Validation loss", f"{float(rm['loss']):.4f}" if rm else "—")
+    r3.metric("Training images", f"{int(focus_run.get('train_size', 0)):,}")
+    r4.metric("Recorded run time", f"{float(focus_run.get('total_elapsed_seconds', 0.0)):.1f} s")
+
+    left, right = st.columns([1.15, .85], gap="medium")
+    with left:
+        if study_key == "alpha":
+            fig = _client_distribution_figure(focus_run)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="measured_client_class_distribution")
+        elif study_key in ("clients", "samples"):
+            fig = _client_size_figure(focus_run)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="measured_client_sizes")
+        elif study_key == "participation":
+            fig = _participation_heatmap(focus_run)
+            if fig:
+                st.plotly_chart(fig, use_container_width=True, config={"displayModeBar": False}, key="measured_participation_heatmap")
+        elif study_key == "epochs":
+            compute_fig = _local_compute_figure(selected_rows)
+            if compute_fig:
+                st.plotly_chart(compute_fig, use_container_width=True, config={"displayModeBar": False}, key="measured_local_compute")
+        if study_key in ("clients", "samples", "participation"):
+            # Distribution composition is useful context for interpreting all three studies.
+            dist_fig = _client_distribution_figure(focus_run)
+            if dist_fig:
+                with st.expander("Inspect land-cover composition by satellite"):
+                    st.plotly_chart(dist_fig, use_container_width=True, config={"displayModeBar": False}, key="measured_optional_class_mix")
+
+    with right, st.container(border=True):
+        st.markdown("<div class='panel-title'>What this run changed</div>", unsafe_allow_html=True)
+        st.write(f"**Configuration:** {case_for_detail}")
+        st.write(f"**Model:** {cfg.get('dataset', 'EuroSAT RGB')} · {cfg.get('image_size', 32)}×{cfg.get('image_size', 32)} input images")
+        st.write(f"**Training:** {int(cfg.get('rounds', 50))} rounds · {int(cfg.get('local_epochs', 1))} local epoch(s) · batch size {int(cfg.get('batch_size', 32))}")
+        st.write(f"**Validation split:** {int(focus_run.get('validation_size', 0)):,} images")
+        st.write(f"**Held-out test split:** {int(focus_run.get('test_size', 0)):,} images reserved; final test evaluation was not run in this pilot.")
+        fixed_df = _fixed_setting_summary(selected_rows)
+        if not fixed_df.empty:
+            st.markdown("**Settings common to the selected study:**")
+            st.dataframe(fixed_df, use_container_width=True, hide_index=True)
 
     with st.expander("Run configuration and provenance"):
         st.json(cfg)
@@ -854,9 +508,8 @@ def render_measured_studies() -> dict[str, Any] | None:
         })
 
     st.info(
-        "All curves and client-level data are loaded from Member A's saved offline EuroSAT/FedAvg runs. "
-        "The three controls select an exact recorded combination. If a combination is missing, the app reports no data "
-        "instead of estimating or interpolating a curve. The map's satellite positions and coverage regions are illustrative. "
-        "Curves show validation accuracy and validation cross-entropy loss; the pilot did not run final held-out test evaluation."
+        "These are measured results from offline, sequential FedAvg simulations on EuroSAT RGB data. "
+        "The lines show validation accuracy and validation loss—not held-out test performance. "
+        "They are not measurements of real satellite radio links, orbital visibility, or onboard flight hardware."
     )
     return _make_tutor_result(focus_row, focus_run, selected_round)
