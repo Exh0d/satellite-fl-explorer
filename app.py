@@ -12,6 +12,10 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
+import time
+
+# Start timing each Streamlit script run
+run_start_time = time.perf_counter()
 
 # NEW: optional import so the app still starts if `requests` is missing.
 try:
@@ -26,6 +30,8 @@ if str(ROOT) not in sys.path:
 from backend.fl_simulator import CLASS_NAMES, make_preview_partition, run_demo_experiment
 from interface.learn import render_learn as render_learn_page, render_knowledge_check_page
 from interface.measured_studies import render_measured_studies
+
+
 
 st.set_page_config(
     page_title="Satellite FL Explorer",
@@ -382,6 +388,13 @@ TUTOR_INSTRUCTIONS = (
     "Clearly distinguish implemented features from "
     "research ideas that are only illustrated. Keep most responses under about 150 words unless the user asks "
     "for more depth."
+)
+
+# Measure total server-side execution time
+response_time = time.perf_counter() - run_start_time
+
+st.caption(
+    f"App processing time for this update: {response_time:.3f} seconds"
 )
 
 
