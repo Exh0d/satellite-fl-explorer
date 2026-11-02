@@ -12,10 +12,6 @@ import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
 import streamlit as st
-import time
-
-# Start timing each Streamlit script run
-run_start_time = time.perf_counter()
 
 # NEW: optional import so the app still starts if `requests` is missing.
 try:
@@ -389,14 +385,6 @@ TUTOR_INSTRUCTIONS = (
     "research ideas that are only illustrated. Keep most responses under about 150 words unless the user asks "
     "for more depth."
 )
-
-# Measure total server-side execution time
-response_time = time.perf_counter() - run_start_time
-
-st.caption(
-    f"App processing time for this update: {response_time:.3f} seconds"
-)
-
 
 def build_tutor_context(result: dict[str, Any] | None, page: str) -> dict[str, Any]:
     cfg = result.get("config", {}) if result else {}
@@ -1075,4 +1063,20 @@ def main() -> None:
 
 
 if __name__ == "__main__":
+    # Measures the full server-side page execution on every Streamlit rerun.
+    # A rerun occurs when the user changes a widget or submits an action.
+    app_run_started = time.perf_counter()
     main()
+    app_processing_seconds = time.perf_counter() - app_run_started
+
+    with st.container(border=True):
+        st.markdown("**⏱️ Response-time measurement**")
+        st.metric(
+            "Server-side page update",
+            f"{app_processing_seconds:.3f} seconds",
+        )
+        st.caption(
+            "Measured from the start of main() until the page's Streamlit "
+            "elements and chart commands are created. This includes server-side "
+            "processing, but excludes browser rendering and network delay."
+        )
